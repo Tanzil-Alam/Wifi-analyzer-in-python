@@ -2,7 +2,7 @@
 
 This is a python code that analyzes wifi connection and gives you a proper output to know how to get better speed. it shows you a proper graph instead just dbi numbers. It uses some blocks and many librarys to get better wifi signal. Here you can download it :
 
-Type in your terminal : pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ Wifi-Analyzer
+Type in your terminal : pip install -i https://test.pypi.org/simple/ Wifi-Analyzer
 
 For run : python -m analyzer
 
