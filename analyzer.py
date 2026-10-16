@@ -1,171 +1,178 @@
-import os
 import sys
 import time
 import shutil
+import math
 import threading
 import socket
-import ctypes
-from ctypes import wintypes
-import numpy as np
+import select
+import psutil
 
-try:
+if sys.platform == "win32":
     import msvcrt
-except ImportError:
+    import os
+    os.system("")
+else:
     msvcrt = None
 
 sys.stdout.reconfigure(encoding="utf-8")
-os.system("")
 
 BLOCKS = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-WHITE, DIM, RESET = "\033[97m", "\033[90m", "\033[0m"
-iphlp = ctypes.windll.iphlpapi
+WHITE = "\033[97m"
+DIM = "\033[90m"
+RESET = "\033[0m"
 
-class MIB_IF_ROW2(ctypes.Structure):
-    _fields_ = [
-        ('InterfaceLuid', ctypes.c_ulonglong), ('InterfaceIndex', wintypes.DWORD),
-        ('InterfaceGuid', ctypes.c_byte * 16), ('Alias', ctypes.c_wchar * 257),
-        ('Description', ctypes.c_wchar * 257), ('PhysicalAddressLength', wintypes.DWORD),
-        ('PhysicalAddress', ctypes.c_byte * 32), ('PermanentPhysicalAddress', ctypes.c_byte * 32),
-        ('Mtu', wintypes.DWORD), ('Type', wintypes.DWORD), ('TunnelType', wintypes.DWORD),
-        ('MediaType', wintypes.DWORD), ('PhysicalMediumType', wintypes.DWORD),
-        ('AccessType', wintypes.DWORD), ('DirectionType', wintypes.DWORD),
-        ('InterfaceAndOperStatusFlags', ctypes.c_byte * 4), ('OperStatus', wintypes.DWORD),
-        ('AdminStatus', wintypes.DWORD), ('MediaConnectState', wintypes.DWORD),
-        ('NetworkGuid', ctypes.c_byte * 16), ('ConnectionType', wintypes.DWORD),
-        ('padding1', wintypes.DWORD), ('TransmitLinkSpeed', ctypes.c_ulonglong),
-        ('ReceiveLinkSpeed', ctypes.c_ulonglong), ('InOctets', ctypes.c_ulonglong),
-        ('InUcastPkts', ctypes.c_ulonglong), ('InNUcastPkts', ctypes.c_ulonglong),
-        ('InDiscards', ctypes.c_ulonglong), ('InErrors', ctypes.c_ulonglong),
-        ('InUnknownProtos', ctypes.c_ulonglong), ('InUcastOctets', ctypes.c_ulonglong),
-        ('InMulticastOctets', ctypes.c_ulonglong), ('InBroadcastOctets', ctypes.c_ulonglong),
-        ('OutOctets', ctypes.c_ulonglong), ('OutUcastPkts', ctypes.c_ulonglong),
-        ('OutNUcastPkts', ctypes.c_ulonglong), ('OutDiscards', ctypes.c_ulonglong),
-        ('OutErrors', ctypes.c_ulonglong), ('OutUcastOctets', ctypes.c_ulonglong),
-        ('OutMulticastOctets', ctypes.c_ulonglong), ('OutBroadcastOctets', ctypes.c_ulonglong),
-        ('OutQLen', ctypes.c_ulonglong)
-    ]
-
-class MIB_IF_TABLE2(ctypes.Structure):
-    _fields_ = [('NumEntries', wintypes.ULONG), ('padding', wintypes.ULONG), ('Table', MIB_IF_ROW2 * 1)]
-
-
-class NetMonitor:
+class NetworkMonitor:
     def __init__(self):
         self.lock = threading.Lock()
         self.connected = False
-        self.kbps = 0.0
-        self.ping_ms = 0.0
-        self.running = True
+        self.speed = 0.0
+        self.ping = 0.0
+        self.active = True
 
     def start(self):
-        threading.Thread(target=self._traffic_worker, daemon=True).start()
-        threading.Thread(target=self._ping_worker, daemon=True).start()
+        threading.Thread(target=self._track_traffic, daemon=True).start()
+        threading.Thread(target=self._track_ping, daemon=True).start()
 
-    def _traffic_worker(self):
-        def get_bytes():
-            table_ptr = ctypes.POINTER(MIB_IF_TABLE2)()
-            if iphlp.GetIfTable2(ctypes.byref(table_ptr)) == 0 and table_ptr:
-                num = table_ptr.contents.NumEntries
-                arr = ctypes.cast(ctypes.byref(table_ptr.contents.Table), ctypes.POINTER(MIB_IF_ROW2 * num)).contents
-                total = sum(r.InOctets + r.OutOctets for r in arr if r.OperStatus == 1)
-                iphlp.FreeMibTable(table_ptr)
-                return total
+    def _get_bytes(self):
+        try:
+            io = psutil.net_io_counters(pernic=True)
+            return sum(
+                s.bytes_recv + s.bytes_sent 
+                for net, s in io.items() 
+                if "loopback" not in net.lower() and not net.startswith("lo")
+            )
+        except Exception:
             return 0
 
-        last_bytes, last_t = get_bytes(), time.perf_counter()
-        while self.running:
+    def _track_traffic(self):
+        last_bytes = self._get_bytes()
+        last_time = time.perf_counter()
+        while self.active:
             time.sleep(0.12)
-            now, cur_bytes = time.perf_counter(), get_bytes()
-            dt = max(0.001, now - last_t)
-            speed = ((cur_bytes - last_bytes) / 1024.0) / dt if last_bytes > 0 and cur_bytes >= last_bytes else 0.0
-            last_bytes, last_t = cur_bytes, now
-
+            now = time.perf_counter()
+            curr_bytes = self._get_bytes()
+            dt = max(0.001, now - last_time)
+            if last_bytes > 0 and curr_bytes >= last_bytes:
+                raw_speed = (((curr_bytes - last_bytes) / 1024.0) * 8.0) / dt
+            else:
+                raw_speed = 0.0
+            last_bytes, last_time = curr_bytes, now
             with self.lock:
-                self.kbps = self.kbps * 0.4 + speed * 0.6
+                self.speed = (self.speed * 0.4) + (raw_speed * 0.6)
 
-    def _ping_worker(self):
-        while self.running:
+    def _track_ping(self):
+        while self.active:
             try:
                 t0 = time.perf_counter()
-                s = socket.create_connection(('1.1.1.1', 53), timeout=0.5)
+                conn = socket.create_connection(('1.1.1.1', 53), timeout=0.5)
                 ms = (time.perf_counter() - t0) * 1000.0
-                s.close()
+                conn.close()
                 with self.lock:
-                    self.ping_ms, self.connected = round(ms, 1), True
-            except:
+                    self.ping = round(ms, 1)
+                    self.connected = True
+            except (socket.timeout, OSError):
                 with self.lock:
-                    self.ping_ms, self.connected = 0.0, False
+                    self.ping = 0.0
+                    self.connected = False
             time.sleep(0.25)
-
 
 class TerminalVisualizer:
     def __init__(self):
-        self.monitor = NetMonitor()
+        self.monitor = NetworkMonitor()
         self.monitor.start()
         self.history = []
-        self.smooth_val = 0.0
-        self.frames = 0
-        self.bar_w = 2
+        self.val = 0.0
+        self.tick = 0
+        self.width = 2
+
+    def _check_input(self):
+        if msvcrt:
+            if msvcrt.kbhit():
+                return msvcrt.getch()
+        else:
+            rlist, _, _ = select.select([sys.stdin], [], [], 0.0)
+            if rlist:
+                return sys.stdin.read(1).encode('utf-8')
+        return None
 
     def run(self):
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
+        old_settings = None
+        if not msvcrt:
+            import termios
+            import tty
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
         try:
             while True:
                 t0 = time.perf_counter()
                 cols, lines = shutil.get_terminal_size((80, 24))
-                self.frames += 1
-                
+                self.tick += 1
                 with self.monitor.lock:
-                    conn, kbps, ping = self.monitor.connected, self.monitor.kbps, self.monitor.ping_ms
-
-                if not conn:
-                    self.smooth_val *= 0.7
+                    connected = self.monitor.connected
+                    speed = self.monitor.speed
+                    ping = self.monitor.ping
+                if not connected:
+                    self.val *= 0.7
                 else:
-                    boost = min(0.5, np.log1p(kbps) / 20.0)
+                    boost = min(0.5, math.log1p(speed) / 20.0)
                     penalty = 0.15 if ping > 120 else (0.05 if ping == 0 else 0.0)
-                    target = np.clip(0.3 + boost - penalty, 0.05, 1.0)
-                    self.smooth_val += (target - self.smooth_val) * 0.2
-
-                bar_count = max(6, (cols - 2) // (self.bar_w + 1))
+                    target = max(0.05, min(1.0, 0.3 + boost - penalty))
+                    self.val += (target - self.val) * 0.2
+                bar_count = max(6, (cols - 2) // (self.width + 1))
                 if len(self.history) != bar_count:
-                    self.history = [self.smooth_val] * bar_count
-                if self.frames % 2 == 0:
+                    self.history = [self.val] * bar_count
+                if self.tick % 2 == 0:
                     self.history.pop(0)
-                    self.history.append(self.smooth_val)
-
-                bar_h = max(4, lines - 2)
-                pad = max(0, (cols - (bar_count * (self.bar_w + 1) - 1)) // 2)
+                    self.history.append(self.val)
+                h = max(4, lines - 3)
+                pad = max(0, (cols - (bar_count * (self.width + 1) - 1)) // 2)
+                if connected:
+                    if speed >= 1000.0:
+                        speed_str = f"{speed / 1000.0:.1f} Mbps"
+                    else:
+                        speed_str = f"{speed:.0f} kbps"
+                    header = f"{WHITE}Connected{RESET} {speed_str} {ping:.0f} ms"
+                else:
+                    header = f"{DIM}Disconnected 0 kbps -- ms{RESET}"
                 
-                speed_str = f"{kbps:.0f} KB/s"
-                title = f"{WHITE}Connected{RESET}  {speed_str}  {ping:.0f} ms" if conn else f"{DIM}Disconnected  0 KB/s  -- ms{RESET}"
-                output = [" " * pad + title]
-
-                steps_arr = (np.clip(self.history, 0, 1) * (bar_h * 8)).astype(int)
-                for r in range(bar_h - 1, -1, -1):
-                    row_line = [" " * pad]
-                    for b in range(bar_count):
-                        diff = steps_arr[b] - (r * 8)
-                        char = "█" * self.bar_w if diff >= 8 else (" " * self.bar_w if diff <= 0 else BLOCKS[diff] * self.bar_w)
-                        row_line.append(f"{WHITE}{char}{RESET}" + (" " if b < bar_count - 1 else ""))
-                    output.append("".join(row_line))
-
-                sys.stdout.write("\033[H" + "\n".join(output))
+                controls = f"  {DIM}[Q]: Quit | [P]: Toggle Width ({self.width}){RESET}"
+                buf = [" " * pad + header + controls]
+                steps = [int(max(0, min(1, v)) * (h * 8)) for v in self.history]
+                
+                for r in range(h - 1, -1, -1):
+                    row = [" " * pad]
+                    floor = r * 8
+                    for idx in range(bar_count):
+                        diff = steps[idx] - floor
+                        if diff >= 8:
+                            char = "█" * self.width
+                        elif diff <= 0:
+                            char = " " * self.width
+                        else:
+                            char = BLOCKS[diff] * self.width
+                        row.append(f"{WHITE}{char}{RESET}" + (" " if idx < bar_count - 1 else ""))
+                    buf.append("".join(row))
+                sys.stdout.write("\033[H" + "\n".join(buf))
                 sys.stdout.flush()
-
-                if msvcrt and msvcrt.kbhit():
-                    ch = msvcrt.getch()
-                    if ch in (b"q", b"Q", b"\x03"): break
-                    elif ch in (b"p", b"P"): self.bar_w = 1 if self.bar_w == 2 else 2
-
-                time.sleep(max(0.001, (1.0 / 60.0) - (time.perf_counter() - t0)))
+                key = self._check_input()
+                if key:
+                    if key in (b"q", b"Q", b"\x03"):
+                        break
+                    elif key in (b"p", b"P"):
+                        self.width = 1 if self.width == 2 else 2
+                dt = time.perf_counter() - t0
+                time.sleep(max(0.001, (1.0 / 60.0) - dt))
         except KeyboardInterrupt:
             pass
         finally:
-            self.monitor.running = False
+            self.monitor.active = False
+            if old_settings:
+                import termios
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
             sys.stdout.write("\033[?25h\033[2J\033[H")
             sys.stdout.flush()
-
 
 if __name__ == "__main__":
     TerminalVisualizer().run()
