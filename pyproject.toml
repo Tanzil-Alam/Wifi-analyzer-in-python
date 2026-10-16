@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Wifi-Analyzer"
+version = "0.1.0"
+description = "A WiFi analyzer tool in Python"
+readme = "README.md"
+requires-python = ">=3.7"
+authors = [
+    { name = "Tanzil Alam" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
