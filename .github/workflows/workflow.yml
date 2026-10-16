@@ -3,15 +3,15 @@ name: Publish Python Package to TestPyPI
 on:
   push:
     tags:
-      - 'v*' 
+      - 'v*'
   workflow_dispatch:
 
 jobs:
   build-and-publish:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     permissions:
-      id-token: write 
+      id-token: write
 
     steps:
       - name: Checkout repository
